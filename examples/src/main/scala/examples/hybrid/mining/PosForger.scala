@@ -1,16 +1,13 @@
 package examples.hybrid.mining
 
-import akka.actor.{Actor, ActorRef}
+import akka.actor.{Actor, ActorRef, ActorSystem, Props}
 import com.google.common.primitives.Longs
-import examples.commons.{SimpleBoxTransaction, SimpleBoxTransactionMemPool}
-import examples.curvepos.transaction.PublicKey25519NoncedBox
+import examples.commons.{PublicKey25519NoncedBox, SimpleBoxTransaction, SimpleBoxTransactionMemPool}
 import examples.hybrid.blocks.{HybridBlock, PosBlock, PowBlock}
 import examples.hybrid.history.HybridHistory
 import examples.hybrid.state.HBoxStoredState
 import examples.hybrid.wallet.HWallet
-import scorex.core.LocalInterface.LocallyGeneratedModifier
-import scorex.core.NodeViewHolder.{CurrentView, GetDataFromCurrentView}
-import scorex.core.settings.ScorexSettings
+import scorex.core.NodeViewHolder.CurrentView
 import scorex.core.transaction.state.PrivateKey25519
 import scorex.core.utils.ScorexLogging
 import scorex.crypto.hash.Blake2b256
@@ -20,6 +17,10 @@ import scorex.utils.Random
 class PosForger(settings: HybridSettings, viewHolderRef: ActorRef) extends Actor with ScorexLogging {
 
   import PosForger._
+  import PosForger.ReceivableMessages._
+  import scorex.core.NodeViewHolder.ReceivableMessages.GetDataFromCurrentView
+  import scorex.core.LocallyGeneratedModifiersMessages.ReceivableMessages.LocallyGeneratedModifier
+
 
   var forging = false
 
@@ -58,11 +59,22 @@ class PosForger(settings: HybridSettings, viewHolderRef: ActorRef) extends Actor
 }
 
 object PosForger extends ScorexLogging {
+
+  import scorex.core.NodeViewHolder.ReceivableMessages.GetDataFromCurrentView
+
   val InitialDifficuly = 150000000L
 
-  case object StartForging
+  object ReceivableMessages {
+    case object StartForging
+    case object StopForging
+    case class PosForgingInfo(pairCompleted: Boolean,
+                              bestPowBlock: PowBlock,
+                              diff: BigInt,
+                              boxKeys: Seq[(PublicKey25519NoncedBox, PrivateKey25519)],
+                              txsToInclude: Seq[SimpleBoxTransaction])
+  }
 
-  case object StopForging
+  import ReceivableMessages.PosForgingInfo
 
   def hit(pwb: PowBlock)(box: PublicKey25519NoncedBox): BigInt = {
     val h = Blake2b256(pwb.bytes ++ box.bytes)
@@ -128,8 +140,10 @@ object PosForger extends ScorexLogging {
 
 }
 
-case class PosForgingInfo(pairCompleted: Boolean,
-                          bestPowBlock: PowBlock,
-                          diff: BigInt,
-                          boxKeys: Seq[(PublicKey25519NoncedBox, PrivateKey25519)],
-                          txsToInclude: Seq[SimpleBoxTransaction])
+object PosForgerRef {
+  def props(settings: HybridSettings, viewHolderRef: ActorRef): Props = Props(new PosForger(settings, viewHolderRef))
+  def apply(settings: HybridSettings, viewHolderRef: ActorRef)
+           (implicit system: ActorSystem): ActorRef = system.actorOf(props(settings, viewHolderRef))
+  def apply(name: String, settings: HybridSettings, viewHolderRef: ActorRef)
+           (implicit system: ActorSystem): ActorRef = system.actorOf(props(settings, viewHolderRef), name)
+}

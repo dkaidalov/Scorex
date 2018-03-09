@@ -2,8 +2,6 @@ package examples.commons
 
 import com.google.common.primitives.{Bytes, Ints, Longs}
 import examples.commons.SimpleBoxTransaction._
-import examples.curvepos.{Nonce, Value}
-import examples.curvepos.transaction.PublicKey25519NoncedBox
 import examples.hybrid.wallet.HWallet
 import io.circe.Json
 import io.circe.syntax._
@@ -63,7 +61,7 @@ case class SimpleBoxTransaction(from: IndexedSeq[(PublicKey25519Proposition, Non
 
   override lazy val json: Json = Map(
     "id" -> Base58.encode(id).asJson,
-    "newBoxes" -> newBoxes.map(b => Base58.encode(b.id).asJson).asJson,
+    "newBoxes" -> newBoxes.map(b => Base58.encode(b.id).asJson).toSeq.asJson,
     "boxesToRemove" -> boxIdsToOpen.map(id => Base58.encode(id).asJson).asJson,
     "from" -> from.map { s =>
       Map(
@@ -132,6 +130,8 @@ object SimpleBoxTransaction {
       w.secretByPublicImage(b.box.proposition).map(s => (s, b.box.nonce, b.box.value))
     }.toIndexedSeq
     val canSend = from.map(_._3.toLong).sum
+    // TODO: fixme, What should we do if `w.publicKeys` is empty?
+    @SuppressWarnings(Array("org.wartremover.warts.TraversableOps"))
     val charge: (PublicKey25519Proposition, Value) = (w.publicKeys.head, Value @@ (canSend - amount - fee))
 
     val outputs: IndexedSeq[(PublicKey25519Proposition, Value)] = (to :+ charge).toIndexedSeq

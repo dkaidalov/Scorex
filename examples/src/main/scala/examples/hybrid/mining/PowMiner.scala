@@ -1,15 +1,14 @@
 package examples.hybrid.mining
 
-import akka.actor.{Actor, ActorRef}
+import akka.actor.{Actor, ActorRef, ActorSystem, Props}
 import examples.commons.SimpleBoxTransactionMemPool
 import examples.hybrid.blocks.{HybridBlock, PowBlock, PowBlockCompanion, PowBlockHeader}
 import examples.hybrid.history.HybridHistory
 import examples.hybrid.state.HBoxStoredState
 import examples.hybrid.util.Cancellable
 import examples.hybrid.wallet.HWallet
-import scorex.core.LocalInterface.LocallyGeneratedModifier
 import scorex.core.ModifierId
-import scorex.core.NodeViewHolder.{CurrentView, GetDataFromCurrentView}
+import scorex.core.NodeViewHolder.CurrentView
 import scorex.core.block.Block.BlockId
 import scorex.core.transaction.box.proposition.PublicKey25519Proposition
 import scorex.core.utils.ScorexLogging
@@ -29,6 +28,10 @@ import scala.util.Random
 class PowMiner(viewHolderRef: ActorRef, settings: HybridMiningSettings) extends Actor with ScorexLogging {
 
   import PowMiner._
+  import PowMiner.ReceivableMessages._
+  import scorex.core.NodeViewHolder.ReceivableMessages.GetDataFromCurrentView
+  import scorex.core.LocallyGeneratedModifiersMessages.ReceivableMessages.LocallyGeneratedModifier
+
 
   private var cancellableOpt: Option[Cancellable] = None
   private var mining = false
@@ -44,11 +47,9 @@ class PowMiner(viewHolderRef: ActorRef, settings: HybridMiningSettings) extends 
         val pairCompleted = view.history.pairCompleted
         val bestPowBlock = view.history.bestPowBlock
         val bestPosId = view.history.bestPosId
-        val pubkey = if (view.vault.publicKeys.nonEmpty) {
-          view.vault.publicKeys.head
-        } else {
-          view.vault.generateNewSecret().publicKeys.head
-        }
+        // TODO: fixme, What should we do if `view.vault.generateNewSecret().publicKeys` is empty?
+        @SuppressWarnings(Array("org.wartremover.warts.TraversableOps"))
+        val pubkey = view.vault.publicKeys.headOption getOrElse view.vault.generateNewSecret().publicKeys.head
         PowMiningInfo(pairCompleted, difficulty, bestPowBlock, bestPosId, pubkey)
     }
     GetDataFromCurrentView[HybridHistory,
@@ -144,18 +145,17 @@ class PowMiner(viewHolderRef: ActorRef, settings: HybridMiningSettings) extends 
 }
 
 object PowMiner extends App {
+  object ReceivableMessages {
+    case object StartMining
+    case object StopMining
+    case object MineBlock
+    case class PowMiningInfo(pairCompleted: Boolean,
+                             powDifficulty: BigInt,
+                             bestPowBlock: PowBlock,
+                             bestPosId: ModifierId,
+                             pubkey: PublicKey25519Proposition)
 
-  case object StartMining
-
-  case object StopMining
-
-  case object MineBlock
-
-  case class PowMiningInfo(pairCompleted: Boolean,
-                           powDifficulty: BigInt,
-                           bestPowBlock: PowBlock,
-                           bestPosId: ModifierId,
-                           pubkey: PublicKey25519Proposition)
+  }
 
   def powIteration(parentId: BlockId,
                    prevPosId: BlockId,
@@ -183,4 +183,15 @@ object PowMiner extends App {
     foundBlock
   }
 
+}
+
+object PowMinerRef {
+  def props(viewHolderRef: ActorRef, settings: HybridMiningSettings): Props =
+    Props(new PowMiner(viewHolderRef, settings))
+
+  def apply(viewHolderRef: ActorRef, settings: HybridMiningSettings)
+           (implicit system: ActorSystem): ActorRef = system.actorOf(props(viewHolderRef, settings))
+
+  def apply(name: String, viewHolderRef: ActorRef, settings: HybridMiningSettings)
+           (implicit system: ActorSystem): ActorRef = system.actorOf(props(viewHolderRef, settings), name)
 }

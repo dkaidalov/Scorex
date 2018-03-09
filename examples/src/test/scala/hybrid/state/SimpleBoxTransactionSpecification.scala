@@ -1,8 +1,7 @@
 package hybrid.state
 
-import examples.commons.SimpleBoxTransaction
-import examples.curvepos.transaction.PublicKey25519NoncedBox
-import examples.curvepos.{Nonce, Value}
+import examples.commons.{PublicKey25519NoncedBox, SimpleBoxTransaction}
+import examples.commons.{Nonce, Value}
 import examples.hybrid.state.HBoxStoredState
 import hybrid.HybridGenerators
 import org.scalatest.prop.{GeneratorDrivenPropertyChecks, PropertyChecks}
@@ -14,6 +13,7 @@ import scorex.crypto.encode.Base58
 import scorex.crypto.hash.Sha256
 import scorex.crypto.signatures.{PublicKey, Signature}
 
+@SuppressWarnings(Array("org.wartremover.warts.TraversableOps"))
 class SimpleBoxTransactionSpecification extends PropSpec
   with PropertyChecks
   with GeneratorDrivenPropertyChecks

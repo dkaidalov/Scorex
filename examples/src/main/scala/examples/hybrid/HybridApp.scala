@@ -1,24 +1,26 @@
 package examples.hybrid
 
-import akka.actor.{ActorRef, Props}
-import examples.commons.SimpleBoxTransaction
+import akka.actor.ActorRef
+import examples.commons.{SimpleBoxTransaction, SimpleBoxTransactionMemPool}
 import examples.hybrid.api.http.{DebugApiRoute, StatsApiRoute, WalletApiRoute}
 import examples.hybrid.blocks.HybridBlock
-import examples.hybrid.history.{HybridSyncInfo, HybridSyncInfoMessageSpec}
-import examples.hybrid.mining.{HybridSettings, PosForger, PowMiner}
-import examples.hybrid.wallet.SimpleBoxTransactionGenerator
-import examples.hybrid.wallet.SimpleBoxTransactionGenerator.StartGeneration
+import examples.hybrid.history.{HybridHistory, HybridSyncInfo, HybridSyncInfoMessageSpec}
+import examples.hybrid.mining._
+import examples.hybrid.wallet.{SimpleBoxTransactionGenerator, SimpleBoxTransactionGeneratorRef}
 import scorex.core.api.http.{ApiRoute, NodeViewApiRoute, PeersApiRoute, UtilsApiRoute}
 import scorex.core.app.Application
-import scorex.core.network.NodeViewSynchronizer
+import scorex.core.network.{NodeViewSynchronizer, NodeViewSynchronizerRef}
 import scorex.core.network.message.MessageSpec
 import scorex.core.settings.ScorexSettings
 import scorex.core.transaction.box.proposition.PublicKey25519Proposition
 
 import scala.concurrent.duration._
+import scala.io.Source
 import scala.language.postfixOps
 
 class HybridApp(val settingsFilename: String) extends Application {
+
+  import examples.hybrid.wallet.SimpleBoxTransactionGenerator.ReceivableMessages.StartGeneration
 
   override type P = PublicKey25519Proposition
   override type TX = SimpleBoxTransaction
@@ -32,7 +34,7 @@ class HybridApp(val settingsFilename: String) extends Application {
 
   override protected lazy val additionalMessageSpecs: Seq[MessageSpec[_]] = Seq(HybridSyncInfoMessageSpec)
 
-  override val nodeViewHolderRef: ActorRef = actorSystem.actorOf(Props(new HybridNodeViewHolder(settings, hybridSettings.mining)))
+  override val nodeViewHolderRef: ActorRef = HybridNodeViewHolderRef(settings, hybridSettings.mining, timeProvider)
 
   override val apiRoutes: Seq[ApiRoute] = Seq(
     DebugApiRoute(settings.restApi, nodeViewHolderRef),
@@ -40,20 +42,21 @@ class HybridApp(val settingsFilename: String) extends Application {
     StatsApiRoute(settings.restApi, nodeViewHolderRef),
     UtilsApiRoute(settings.restApi),
     NodeViewApiRoute[P, TX](settings.restApi, nodeViewHolderRef),
-    PeersApiRoute(peerManagerRef, networkController, settings.restApi)
+    PeersApiRoute(peerManagerRef, networkControllerRef, settings.restApi)
   )
 
-  override val apiTypes: Set[Class[_]] = Set(classOf[UtilsApiRoute], classOf[DebugApiRoute], classOf[WalletApiRoute],
-    classOf[NodeViewApiRoute[P, TX]], classOf[PeersApiRoute], classOf[StatsApiRoute])
+  override val swaggerConfig: String = Source.fromResource("api/testApi.yaml").getLines.mkString("\n")
 
-  val miner = actorSystem.actorOf(Props(new PowMiner(nodeViewHolderRef, hybridSettings.mining)))
-  val forger = actorSystem.actorOf(Props(new PosForger(hybridSettings, nodeViewHolderRef)))
+  val miner: ActorRef = PowMinerRef(nodeViewHolderRef, hybridSettings.mining)
+  val forger: ActorRef = PosForgerRef(hybridSettings, nodeViewHolderRef)
 
-  override val localInterface: ActorRef = actorSystem.actorOf(Props(new HLocalInterface(nodeViewHolderRef, miner, forger, hybridSettings.mining)))
+  override val localInterface: ActorRef = HLocalInterfaceRef(nodeViewHolderRef, miner, forger, hybridSettings.mining)
 
   override val nodeViewSynchronizer: ActorRef =
-    actorSystem.actorOf(Props(new NodeViewSynchronizer[P, TX, HybridSyncInfo, HybridSyncInfoMessageSpec.type]
-    (networkController, nodeViewHolderRef, localInterface, HybridSyncInfoMessageSpec, settings.network)))
+    actorSystem.actorOf(NodeViewSynchronizerRef.props[P, TX, HybridSyncInfo, HybridSyncInfoMessageSpec.type,
+                                                      PMOD, HybridHistory, SimpleBoxTransactionMemPool]
+                                                     (networkControllerRef, nodeViewHolderRef, localInterface,
+                                                      HybridSyncInfoMessageSpec, settings.network, timeProvider))
 
   //touching lazy vals
   miner
@@ -62,7 +65,7 @@ class HybridApp(val settingsFilename: String) extends Application {
 
   if (settings.network.nodeName.startsWith("generatorNode")) {
     log.info("Starting transactions generation")
-    val generator: ActorRef = actorSystem.actorOf(Props(new SimpleBoxTransactionGenerator(nodeViewHolderRef)))
+    val generator: ActorRef = SimpleBoxTransactionGeneratorRef(nodeViewHolderRef)
     generator ! StartGeneration(10 seconds)
   }
 }

@@ -1,12 +1,10 @@
 package examples.hybrid
 
-import akka.actor.ActorRef
+import akka.actor.{ActorRef, ActorSystem, Props}
 import examples.commons.SimpleBoxTransaction
 import examples.hybrid.blocks.{HybridBlock, PosBlock, PowBlock}
 import examples.hybrid.mining.HybridMiningSettings
-import examples.hybrid.mining.PosForger.{StartForging, StopForging}
-import examples.hybrid.mining.PowMiner.{MineBlock, StartMining, StopMining}
-import scorex.core.{LocalInterface, ModifierId, VersionTag}
+import scorex.core.{LocalInterface, ModifierId}
 import scorex.core.transaction.box.proposition.PublicKey25519Proposition
 
 class HLocalInterface(override val viewHolderRef: ActorRef,
@@ -14,6 +12,9 @@ class HLocalInterface(override val viewHolderRef: ActorRef,
                       posForgerRef: ActorRef,
                       minerSettings: HybridMiningSettings)
   extends LocalInterface[PublicKey25519Proposition, SimpleBoxTransaction, HybridBlock] {
+
+  import examples.hybrid.mining.PosForger.ReceivableMessages.{StartForging, StopForging}
+  import examples.hybrid.mining.PowMiner.ReceivableMessages.{MineBlock, StartMining, StopMining}
 
   private var block = false
 
@@ -30,8 +31,6 @@ class HLocalInterface(override val viewHolderRef: ActorRef,
   override protected def onSemanticallyFailedModification(mod: HybridBlock): Unit = {}
 
   override protected def onNewSurface(newSurface: Seq[ModifierId]): Unit = {}
-
-  override protected def onChangedState(isRollback: Boolean, newVersion: VersionTag): Unit = {}
 
   override protected def onRollbackFailed(): Unit = {
     log.error("Too deep rollback occurred!")
@@ -66,4 +65,26 @@ class HLocalInterface(override val viewHolderRef: ActorRef,
     posForgerRef ! StopForging
     block = true
   }
+}
+
+object HLocalInterfaceRef {
+  def props(viewHolderRef: ActorRef,
+            powMinerRef: ActorRef,
+            posForgerRef: ActorRef,
+            minerSettings: HybridMiningSettings): Props =
+    Props(new HLocalInterface(viewHolderRef, powMinerRef, posForgerRef, minerSettings))
+
+  def apply(viewHolderRef: ActorRef,
+            powMinerRef: ActorRef,
+            posForgerRef: ActorRef,
+            minerSettings: HybridMiningSettings)
+           (implicit system: ActorSystem): ActorRef =
+    system.actorOf(props(viewHolderRef, powMinerRef, posForgerRef, minerSettings))
+
+  def apply(name: String, viewHolderRef: ActorRef,
+            powMinerRef: ActorRef,
+            posForgerRef: ActorRef,
+            minerSettings: HybridMiningSettings)
+           (implicit system: ActorSystem): ActorRef =
+    system.actorOf(props(viewHolderRef, powMinerRef, posForgerRef, minerSettings), name)
 }

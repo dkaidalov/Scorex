@@ -1,22 +1,24 @@
 package scorex.core.app
 
-import akka.actor.{ActorRef, ActorSystem, Props}
+import akka.actor.{ActorRef, ActorSystem}
 import akka.http.scaladsl.Http
 import akka.stream.ActorMaterializer
 import scorex.core.{NodeViewHolder, PersistentNodeViewModifier}
 import scorex.core.api.http.{ApiRoute, CompositeHttpService}
 import scorex.core.network._
 import scorex.core.network.message._
-import scorex.core.network.peer.PeerManager
+import scorex.core.network.peer.PeerManagerRef
 import scorex.core.settings.ScorexSettings
 import scorex.core.transaction.box.proposition.Proposition
 import scorex.core.transaction.Transaction
-import scorex.core.utils.ScorexLogging
+import scorex.core.utils.{NetworkTimeProvider, ScorexLogging}
 
 import scala.concurrent.ExecutionContext.Implicits.global
-import scala.reflect.runtime.universe.Type
+import scala.concurrent.duration._
 
 trait Application extends ScorexLogging {
+
+  import scorex.core.network.NetworkController.ReceivableMessages.ShutdownNetwork
 
   type P <: Proposition
   type TX <: Transaction[P]
@@ -30,7 +32,6 @@ trait Application extends ScorexLogging {
 
   //api
   val apiRoutes: Seq[ApiRoute]
-  val apiTypes: Set[Class[_]]
 
   protected implicit lazy val actorSystem = ActorSystem(settings.network.agentName)
 
@@ -56,24 +57,30 @@ trait Application extends ScorexLogging {
   val nodeViewHolderRef: ActorRef
   val nodeViewSynchronizer: ActorRef
   val localInterface: ActorRef
+  /**
+    * API description in openapi format in YAML or JSON
+    */
+  val swaggerConfig: String
+
+  val timeProvider = new NetworkTimeProvider(settings.ntp)
 
 
-  val peerManagerRef = actorSystem.actorOf(Props(new PeerManager(settings)))
+  val peerManagerRef = PeerManagerRef(settings, timeProvider)
 
-  val nProps = Props(new NetworkController(settings.network, messagesHandler, upnp, peerManagerRef))
-  val networkController = actorSystem.actorOf(nProps, "networkController")
+  val networkControllerRef: ActorRef = NetworkControllerRef("networkController",settings.network,
+                                                            messagesHandler, upnp, peerManagerRef, timeProvider)
 
-  lazy val combinedRoute = CompositeHttpService(actorSystem, apiTypes, apiRoutes, settings.restApi).compositeRoute
+  lazy val combinedRoute = CompositeHttpService(actorSystem, apiRoutes, settings.restApi, swaggerConfig).compositeRoute
 
   def run(): Unit = {
     require(settings.network.agentName.length <= ApplicationNameLimit)
 
     log.debug(s"Available processors: ${Runtime.getRuntime.availableProcessors}")
     log.debug(s"Max memory available: ${Runtime.getRuntime.maxMemory}")
-    log.debug(s"RPC is allowed at ${settings.restApi.bindAddress}:${settings.restApi.port}")
+    log.debug(s"RPC is allowed at ${settings.restApi.bindAddress.toString}")
 
     implicit val materializer = ActorMaterializer()
-    Http().bindAndHandle(combinedRoute, settings.restApi.bindAddress, settings.restApi.port)
+    Http().bindAndHandle(combinedRoute, settings.restApi.bindAddress.getAddress.getHostAddress, settings.restApi.bindAddress.getPort)
 
     //on unexpected shutdown
     Runtime.getRuntime.addShutdownHook(new Thread() {
@@ -86,8 +93,8 @@ trait Application extends ScorexLogging {
 
   def stopAll(): Unit = synchronized {
     log.info("Stopping network services")
-    if (settings.network.upnpEnabled) upnp.deletePort(settings.network.port)
-    networkController ! NetworkController.ShutdownNetwork
+    if (settings.network.upnpEnabled) upnp.deletePort(settings.network.bindAddress.getPort)
+    networkControllerRef ! ShutdownNetwork
 
     log.info("Stopping actors (incl. block generator)")
     actorSystem.terminate().onComplete { _ =>

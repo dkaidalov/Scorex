@@ -4,9 +4,8 @@ import java.io.{File, FileOutputStream, FileWriter}
 import java.nio.file.{Files, Paths}
 
 import com.google.common.primitives.{Ints, Longs}
-import examples.commons.SimpleBoxTransaction
-import examples.curvepos.{Nonce, Value}
-import examples.curvepos.transaction.PublicKey25519NoncedBox
+import examples.commons.{PublicKey25519NoncedBox, SimpleBoxTransaction}
+import examples.commons.{Nonce, Value}
 import examples.trimchain.core.{Algos, Constants, TicketSerializer}
 import examples.trimchain.modifiers.{BlockHeader, TBlock}
 import io.iohk.iodb.ByteArrayWrapper
@@ -70,8 +69,7 @@ object OneMinerSimulation extends App with Simulators {
 
   var miningHeight = 0
   var miningUtxo = InMemoryAuthenticatedUtxo(genesisBoxes.size, None, defaultId).applyChanges(genesisChanges, defaultId).get
-
-  assert(currentUtxo.rootHash sameElements miningUtxo.rootHash)
+    .ensuring(_.rootHash sameElements currentUtxo.rootHash)
 
   var generatingBoxes: Seq[PublicKey25519NoncedBox] = genesisBoxes
 
@@ -81,6 +79,8 @@ object OneMinerSimulation extends App with Simulators {
   (1 to blocksNum) foreach { _ =>
     val t0 = System.currentTimeMillis()
 
+    // TODO: fixme, What should we do if `Algos.chooseSnapshots(currentHeight, minerPubKey.pubKeyBytes)` is empty?
+    @SuppressWarnings(Array("org.wartremover.warts.TraversableOps"))
     val newMiningHeight = Algos.chooseSnapshots(currentHeight, minerPubKey.pubKeyBytes).head
 
     if (newMiningHeight > miningHeight) {
@@ -102,7 +102,7 @@ object OneMinerSimulation extends App with Simulators {
 
     val wvalid = Algos.validatePow(block.header, IndexedSeq(miningUtxo.rootHash), Constants.Difficulty)
     require(wvalid)
-    log(s"$currentHeight,$newMiningHeight,${currentUtxo.size},${miningUtxo.size},$wvalid,${headerBytes.length},${TicketSerializer.toBytes(block.header.ticket).length},${block.header.ticket.partialProofs.head.length},${blockBytes.length}")
+    log(s"$currentHeight,$newMiningHeight,${currentUtxo.size},${miningUtxo.size},$wvalid,${headerBytes.length},${TicketSerializer.toBytes(block.header.ticket).length},${block.header.ticket.partialProofs.headOption map (_.length)},${blockBytes.length}")
 
     fullBlocksStore.update(
       ByteArrayWrapper(Ints.toByteArray(height)),

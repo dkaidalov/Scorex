@@ -1,8 +1,8 @@
 package examples.spv.simulation
 
 import com.google.common.primitives.{Ints, Longs}
-import examples.curvepos.{Nonce, Value}
-import examples.curvepos.transaction.PublicKey25519NoncedBox
+import examples.commons.PublicKey25519NoncedBox
+import examples.commons.{Nonce, Value}
 import examples.spv.{Header, SpvAlgos}
 import examples.trimchain.core.Constants._
 import examples.trimchain.simulation.InMemoryAuthenticatedUtxo
@@ -44,6 +44,8 @@ trait SimulatorFuctions {
                stateRoot: Array[Byte],
                transactionsRoot: Array[Byte],
                timestamp: Timestamp): Header = {
+    //TODO: fixme, What should happen if `parents` is empty?
+    @SuppressWarnings(Array("org.wartremover.warts.TraversableOps"))
     val parent = parents.head
     val interlinks: Seq[Array[Byte]] = if (parents.length > 1) SpvAlgos.constructInterlinkVector(parent)
     else Seq(parent.id)

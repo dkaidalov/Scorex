@@ -3,23 +3,22 @@ package scorex.core.network
 import java.net.{InetAddress, InetSocketAddress, NetworkInterface, URI}
 
 import akka.actor._
+import akka.io.Tcp.SO.KeepAlive
 import akka.io.Tcp._
 import akka.io.{IO, Tcp}
 import akka.pattern.ask
 import akka.util.Timeout
 import scorex.core.network.message.{Message, MessageHandler, MessageSpec}
-import scorex.core.network.peer.PeerManager
+import scorex.core.network.peer.PeerManager.EventType
 import scorex.core.settings.NetworkSettings
-import scorex.core.utils.ScorexLogging
+import scorex.core.utils.{NetworkTimeProvider, ScorexLogging}
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration._
 import scala.language.existentials
-import scala.reflect.runtime.universe.TypeTag
 import scala.util.{Failure, Success, Try}
-
 import scala.language.postfixOps
 
 /**
@@ -29,22 +28,28 @@ import scala.language.postfixOps
 class NetworkController(settings: NetworkSettings,
                         messageHandler: MessageHandler,
                         upnp: UPnP,
-                        peerManagerRef: ActorRef
+                        peerManagerRef: ActorRef,
+                        timeProvider: NetworkTimeProvider
                        ) extends Actor with ScorexLogging {
 
-  import NetworkController._
-
-  val peerSynchronizer = context.system.actorOf(Props(new PeerSynchronizer(self, peerManagerRef)), "PeerSynchronizer")
+  import NetworkController.ReceivableMessages._
+  import NetworkControllerSharedMessages.ReceivableMessages.DataFromPeer
+  import scorex.core.network.peer.PeerManager.ReceivableMessages.{CheckPeers, FilterPeers, Disconnected, Subscribe}
+  import PeerConnectionHandler.ReceivableMessages.CloseConnection
 
   private implicit val system: ActorSystem = context.system
 
-  private implicit val timeout: Timeout = Timeout(5 seconds) //fixme: magic constant
+  private val peerSynchronizer: ActorRef = PeerSynchronizerRef("PeerSynchronizer", self, peerManagerRef, settings)
+
+  private implicit val timeout: Timeout = Timeout(settings.controllerTimeout.getOrElse(5 seconds))
 
   private val messageHandlers = mutable.Map[Seq[Message.MessageCode], ActorRef]()
 
+  private val tcpManager = IO(Tcp)
+
   //check own declared address for validity
   if (!settings.localOnly) {
-    settings.declaredAddress.forall { myAddress =>
+    settings.declaredAddress.foreach { myAddress =>
       Try {
         val uri = new URI("http://" + myAddress)
         val myHost = uri.getHost
@@ -65,23 +70,17 @@ class NetworkController(settings: NetworkSettings,
         }
       }.recover { case t: Throwable =>
         log.error("Declared address validation failed: ", t)
-        false
-      }.getOrElse(false)
-    }.ensuring(b => b, "Declared address isn't valid")
+      }
+    }
   }
 
-  lazy val localAddress = new InetSocketAddress(InetAddress.getByName(settings.bindAddress), settings.port)
+  lazy val localAddress = settings.bindAddress
 
   //an address to send to peers
-  lazy val externalSocketAddress = {
-    settings.declaredAddress
-      .flatMap(s => {
-        val Array(address, port) = s.split(":")
-        Try(InetAddress.getByName(address)).map(address =>
-          new InetSocketAddress(address, port.toInt)).toOption
-      }).orElse {
+  lazy val externalSocketAddress: Option[InetSocketAddress] = {
+    settings.declaredAddress orElse {
       if (settings.upnpEnabled) {
-        upnp.externalAddress.map(a => new InetSocketAddress(a, settings.port))
+        upnp.externalAddress.map(a => new InetSocketAddress(a, settings.bindAddress.getPort))
       } else None
     }
   }
@@ -92,15 +91,15 @@ class NetworkController(settings: NetworkSettings,
   lazy val connTimeout = Some(settings.connectionTimeout)
 
   //bind to listen incoming connections
-  IO(Tcp) ! Bind(self, localAddress)
+  tcpManager ! Bind(self, localAddress, options = KeepAlive(true) :: Nil, pullMode = false)
 
   private def bindingLogic: Receive = {
     case Bound(_) =>
-      log.info("Successfully bound to the port " + settings.port)
-      context.system.scheduler.schedule(600.millis, 5.seconds)(peerManagerRef ! PeerManager.CheckPeers)
+      log.info("Successfully bound to the port " + settings.bindAddress.getPort)
+      context.system.scheduler.schedule(600.millis, 5.seconds)(peerManagerRef ! CheckPeers)
 
     case CommandFailed(_: Bind) =>
-      log.error("Network port " + settings.port + " already in use!")
+      log.error("Network port " + settings.bindAddress.getPort + " already in use!")
       context stop self
     //TODO catch?
   }
@@ -126,50 +125,65 @@ class NetworkController(settings: NetworkSettings,
       }
 
     case SendToNetwork(message, sendingStrategy) =>
-      (peerManagerRef ? PeerManager.FilterPeers(sendingStrategy))
+      (peerManagerRef ? FilterPeers(sendingStrategy))
         .map(_.asInstanceOf[Seq[ConnectedPeer]])
         .foreach(_.foreach(_.handlerRef ! message))
   }
 
+  val outgoing = mutable.Set[InetSocketAddress]()
+
   def peerLogic: Receive = {
     case ConnectTo(remote) =>
       log.info(s"Connecting to: $remote")
-      IO(Tcp) ! Connect(remote, localAddress = None, timeout = connTimeout, pullMode = true)
+      outgoing += remote
+      tcpManager ! Connect(remote,
+                          localAddress = externalSocketAddress,
+                          options = KeepAlive(true) :: Nil,
+                          timeout = connTimeout,
+                          pullMode = true) //todo: check pullMode flag
 
     case DisconnectFrom(peer) =>
-      peer.handlerRef ! PeerConnectionHandler.CloseConnection
-      peerManagerRef ! PeerManager.Disconnected(peer.socketAddress)
+      log.info(s"Disconnected from ${peer.socketAddress}")
+      peer.handlerRef ! CloseConnection
+      peerManagerRef ! Disconnected(peer.socketAddress)
 
     case Blacklist(peer) =>
-      peer.handlerRef ! PeerConnectionHandler.Blacklist
+      peer.handlerRef ! PeerConnectionHandler.ReceivableMessages.Blacklist
       // todo: the following message might become unnecessary if we refactor PeerManager to automatically
       // todo: remove peer from `connectedPeers` on receiving `AddToBlackList` message.
-      peerManagerRef ! PeerManager.Disconnected(peer.socketAddress)
+      peerManagerRef ! Disconnected(peer.socketAddress)
 
-    case Connected(remote, _) =>
+    case Connected(remote, local) =>
+      val direction = if(outgoing.contains(remote)) Outgoing else Incoming
+      val logMsg = direction match {
+        case Incoming => s"New incoming connection from $remote established (bound to local $local)"
+        case Outgoing => s"New outgoing connection to $remote established (bound to local $local)"
+      }
+      log.info(logMsg)
       val connection = sender()
-      val props = Props(new PeerConnectionHandler(settings, self, peerManagerRef,
-        messageHandler, connection, externalSocketAddress, remote))
-      val handler = context.actorOf(props)
-      connection ! Register(handler, keepOpenOnPeerClosed = false, useResumeWriting = true)
-      val newPeer = ConnectedPeer(remote, handler)
-      peerManagerRef ! PeerManager.Connected(newPeer)
-      newPeer.handlerRef ! PeerConnectionHandler.StartInteraction
+      val handlerProps: Props = PeerConnectionHandlerRef.props(settings, self, peerManagerRef,
+        messageHandler, connection, direction, externalSocketAddress, remote, timeProvider)
+      context.actorOf(handlerProps) // launch connection handler
+      outgoing -= remote
 
     case CommandFailed(c: Connect) =>
+      outgoing -= c.remoteAddress
       log.info("Failed to connect to : " + c.remoteAddress)
-      peerManagerRef ! PeerManager.Disconnected(c.remoteAddress)
+      peerManagerRef ! Disconnected(c.remoteAddress)
   }
 
   //calls from API / application
   def interfaceCalls: Receive = {
     case ShutdownNetwork =>
       log.info("Going to shutdown all connections & unbind port")
-      (peerManagerRef ? PeerManager.FilterPeers(Broadcast))
+      (peerManagerRef ? FilterPeers(Broadcast))
         .map(_.asInstanceOf[Seq[ConnectedPeer]])
-        .foreach(_.foreach(_.handlerRef ! PeerConnectionHandler.CloseConnection))
+        .foreach(_.foreach(_.handlerRef ! CloseConnection))
       self ! Unbind
       context stop self
+
+    case SubscribePeerManagerEvent(events) =>
+      peerManagerRef ! Subscribe(sender(), events)
   }
 
   override def receive: Receive = bindingLogic orElse businessLogic orElse peerLogic orElse interfaceCalls orElse {
@@ -186,19 +200,39 @@ class NetworkController(settings: NetworkSettings,
 }
 
 object NetworkController {
+  object ReceivableMessages {
+    case class RegisterMessagesHandler(specs: Seq[MessageSpec[_]], handler: ActorRef)
+    case class SendToNetwork(message: Message[_], sendingStrategy: SendingStrategy)
+    case object ShutdownNetwork
+    case class ConnectTo(address: InetSocketAddress)
+    case class DisconnectFrom(peer: ConnectedPeer)
+    case class Blacklist(peer: ConnectedPeer)
+    case class SubscribePeerManagerEvent(events: Seq[EventType.Value])
+  }
+}
 
-  case class RegisterMessagesHandler(specs: Seq[MessageSpec[_]], handler: ActorRef)
+object NetworkControllerRef {
+  def props(settings: NetworkSettings,
+            messageHandler: MessageHandler,
+            upnp: UPnP,
+            peerManagerRef: ActorRef,
+            timeProvider: NetworkTimeProvider): Props =
+    Props(new NetworkController(settings, messageHandler, upnp, peerManagerRef, timeProvider))
 
-  case class SendToNetwork(message: Message[_], sendingStrategy: SendingStrategy)
+  def apply(settings: NetworkSettings,
+            messageHandler: MessageHandler,
+            upnp: UPnP,
+            peerManagerRef: ActorRef,
+            timeProvider: NetworkTimeProvider)
+           (implicit system: ActorSystem): ActorRef =
+    system.actorOf(props(settings, messageHandler, upnp, peerManagerRef, timeProvider))
 
-  case object ShutdownNetwork
-
-  case class ConnectTo(address: InetSocketAddress)
-
-  case class DisconnectFrom(peer: ConnectedPeer)
-
-  case class Blacklist(peer: ConnectedPeer)
-
-  case class DataFromPeer[DT: TypeTag](spec: MessageSpec[DT], data: DT, source: ConnectedPeer)
-
+  def apply(name: String,
+            settings: NetworkSettings,
+            messageHandler: MessageHandler,
+            upnp: UPnP,
+            peerManagerRef: ActorRef,
+            timeProvider: NetworkTimeProvider)
+           (implicit system: ActorSystem): ActorRef =
+    system.actorOf(props(settings, messageHandler, upnp, peerManagerRef, timeProvider), name)
 }

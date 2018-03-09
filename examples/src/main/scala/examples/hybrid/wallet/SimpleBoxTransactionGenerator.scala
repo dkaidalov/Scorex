@@ -1,12 +1,11 @@
 package examples.hybrid.wallet
 
-import akka.actor.{Actor, ActorRef}
+import akka.actor.{Actor, ActorRef, ActorSystem, Props}
 import examples.commons.{SimpleBoxTransaction, SimpleBoxTransactionMemPool}
-import examples.curvepos.Value
+import examples.commons.Value
 import examples.hybrid.history.HybridHistory
 import examples.hybrid.state.HBoxStoredState
-import scorex.core.LocalInterface.LocallyGeneratedTransaction
-import scorex.core.NodeViewHolder.{CurrentView, GetDataFromCurrentView}
+import scorex.core.NodeViewHolder.CurrentView
 import scorex.core.transaction.box.proposition.PublicKey25519Proposition
 import scorex.core.utils.ScorexLogging
 
@@ -20,7 +19,9 @@ import scala.util.{Failure, Random, Success, Try}
   */
 class SimpleBoxTransactionGenerator(viewHolderRef: ActorRef) extends Actor with ScorexLogging {
 
-  import SimpleBoxTransactionGenerator._
+  import SimpleBoxTransactionGenerator.ReceivableMessages._
+  import scorex.core.NodeViewHolder.ReceivableMessages.GetDataFromCurrentView
+  import scorex.core.LocallyGeneratedModifiersMessages.ReceivableMessages.LocallyGeneratedTransaction
 
   private val getRequiredData: GetDataFromCurrentView[HybridHistory,
     HBoxStoredState,
@@ -70,9 +71,16 @@ class SimpleBoxTransactionGenerator(viewHolderRef: ActorRef) extends Actor with 
 }
 
 object SimpleBoxTransactionGenerator {
+  object ReceivableMessages {
+    case class StartGeneration(delay: FiniteDuration)
+    case class GeneratorInfo(tx: Try[SimpleBoxTransaction])
+  }
+}
 
-  case class StartGeneration(delay: FiniteDuration)
-
-  case class GeneratorInfo(tx: Try[SimpleBoxTransaction])
-
+object SimpleBoxTransactionGeneratorRef {
+  def props(viewHolderRef: ActorRef): Props = Props(new SimpleBoxTransactionGenerator(viewHolderRef))
+  def apply(viewHolderRef: ActorRef)
+           (implicit system: ActorSystem): ActorRef = system.actorOf(props(viewHolderRef))
+  def apply(name: String, viewHolderRef: ActorRef)
+           (implicit system: ActorSystem): ActorRef = system.actorOf(props(viewHolderRef), name)
 }

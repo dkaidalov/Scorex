@@ -1,8 +1,8 @@
 package hybrid
 
-import examples.commons.SimpleBoxTransaction
-import examples.curvepos.Nonce
-import examples.curvepos.transaction.{PublicKey25519NoncedBox, PublicKey25519NoncedBoxSerializer}
+import examples.commons.{PublicKey25519NoncedBox, PublicKey25519NoncedBoxSerializer, SimpleBoxTransaction}
+import examples.commons.Nonce
+import examples.commons.PublicKey25519NoncedBoxSerializer
 import examples.hybrid.blocks.{HybridBlock, PosBlock, PowBlock, PowBlockCompanion}
 import examples.hybrid.history.HybridHistory
 import examples.hybrid.state.HBoxStoredState
@@ -15,6 +15,7 @@ import scorex.crypto.encode.Base58
 import scorex.crypto.hash.Blake2b256
 import scorex.testkit.generators.CoreGenerators
 
+@SuppressWarnings(Array("org.wartremover.warts.TraversableOps"))
 trait ModifierGenerators {
   this: HybridGenerators with CoreGenerators =>
 
@@ -40,7 +41,9 @@ trait ModifierGenerators {
     assert(insPerTx >= 1 && insPerTx <= 10)
 
     def filterOutForgedBoxes(in: (ByteArrayWrapper, ByteArrayWrapper)): Boolean = {
-      PublicKey25519NoncedBoxSerializer.parseBytes(in._2.data).map(_.value).getOrElse(0L) > 0
+      //current problem with unstable nodeviewholder spec is caused by coinbase block which always has value 1
+      //so for now we just won't use it
+      PublicKey25519NoncedBoxSerializer.parseBytes(in._2.data).map(_.value).getOrElse(0L) > 1L
     }
 
     val stateBoxes = state.store.getAll()

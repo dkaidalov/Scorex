@@ -13,7 +13,7 @@ import scorex.core.consensus.History.{HistoryComparisonResult, ModifierIds, Prog
 import scorex.core.consensus.{History, ModifierSemanticValidity}
 import scorex.core.settings.ScorexSettings
 import scorex.core.transaction.box.proposition.PublicKey25519Proposition
-import scorex.core.utils.{NetworkTime, ScorexLogging}
+import scorex.core.utils.{NetworkTimeProvider, ScorexLogging}
 import scorex.core.{ModifierId, ModifierTypeId, NodeViewModifier}
 import scorex.crypto.encode.Base58
 import scorex.crypto.hash.Blake2b256
@@ -28,7 +28,8 @@ import scala.util.{Failure, Try}
 class HybridHistory(val storage: HistoryStorage,
                     settings: HybridMiningSettings,
                     validators: Seq[BlockValidator[HybridBlock]],
-                    statsLogger: Option[FileLogger])
+                    statsLogger: Option[FileLogger],
+                    timeProvider: NetworkTimeProvider)
   extends History[HybridBlock, HybridSyncInfo, HybridHistory] with ScorexLogging {
 
   import HybridHistory._
@@ -129,7 +130,7 @@ class HybridHistory(val storage: HistoryStorage,
       }
     }
     // require(modifications.toApply.exists(_.id sameElements powBlock.id))
-    (new HybridHistory(storage, settings, validators, statsLogger), progress)
+    (new HybridHistory(storage, settings, validators, statsLogger, timeProvider), progress)
   }
 
   private def posBlockAppend(posBlock: PosBlock): (HybridHistory, ProgressInfo[HybridBlock]) = {
@@ -153,7 +154,7 @@ class HybridHistory(val storage: HistoryStorage,
     }
     storage.update(posBlock, Some(difficulties), isBest)
 
-    (new HybridHistory(storage, settings, validators, statsLogger), mod)
+    (new HybridHistory(storage, settings, validators, statsLogger, timeProvider), mod)
   }
 
   /**
@@ -178,7 +179,7 @@ class HybridHistory(val storage: HistoryStorage,
     log.info(s"History: block ${Base58.encode(block.id)} appended to chain with score ${storage.heightOf(block.id)}. " +
       s"Best score is ${storage.bestChainScore}. " +
       s"Pair: ${Base58.encode(storage.bestPowId)}|${Base58.encode(storage.bestPosId)}")
-    statsLogger.foreach(l => l.appendString(NetworkTime.time() + ":" +
+    statsLogger.foreach(l => l.appendString(timeProvider.time() + ":" +
       lastBlockIds(bestBlock, 50).map(Base58.encode).mkString(",")))
     res
   }
@@ -193,7 +194,11 @@ class HybridHistory(val storage: HistoryStorage,
 
     val rollbackPoint = newSuffix.headOption
 
+    // TODO: fixme, What should we do if `oldSuffix` is empty?
+    @SuppressWarnings(Array("org.wartremover.warts.TraversableOps"))
     val throwBlocks = oldSuffix.tail.map(id => modifierById(id).get)
+    // TODO: fixme, What should we do if `newSuffix` is empty?
+    @SuppressWarnings(Array("org.wartremover.warts.TraversableOps"))
     val applyBlocks = newSuffix.tail.map(id => modifierById(id).get) ++ Seq(block)
     require(applyBlocks.nonEmpty)
     require(throwBlocks.nonEmpty)
@@ -213,7 +218,10 @@ class HybridHistory(val storage: HistoryStorage,
       val lastPow = modifierById(posBlock.parentId).get.asInstanceOf[PowBlock]
       val powBlocks = lastPowBlocks(DifficultyRecalcPeriod, lastPow) //.ensuring(_.length == DifficultyRecalcPeriod)
 
-      val realTime = lastPow.timestamp - powBlocks.head.timestamp
+      // TODO: fixme, What should we do if `powBlocksHead` is empty?
+      @SuppressWarnings(Array("org.wartremover.warts.TraversableOps"))
+      val powBlocksHead = powBlocks.head
+      val realTime = lastPow.timestamp - powBlocksHead.timestamp
       val brothersCount = powBlocks.map(_.brothersCount).sum
       val expectedTime = (DifficultyRecalcPeriod + brothersCount) * settings.targetBlockDelay.toMillis
       val oldPowDifficulty = storage.getPoWDifficulty(Some(lastPow.prevPosId))
@@ -224,12 +232,12 @@ class HybridHistory(val storage: HistoryStorage,
       val oldPosDifficulty = storage.getPoSDifficulty(lastPow.prevPosId)
       val newPosDiff = oldPosDifficulty * DifficultyRecalcPeriod / ((DifficultyRecalcPeriod + brothersCount) * settings.rParamX10 / 10)
       log.info(s"PoW difficulty changed at ${Base58.encode(posBlock.id)}: old $oldPowDifficulty, new $newPowDiff. " +
-        s" last: $lastPow, head: ${powBlocks.head} | $brothersCount")
+        s" last: $lastPow, head: $powBlocksHead | $brothersCount")
       log.info(s"PoS difficulty changed: old $oldPosDifficulty, new $newPosDiff")
       (newPowDiff, newPosDiff)
     } else {
       //Same difficulty as in previous block
-      assert(modifierById(posBlock.parentId).isDefined)
+      assert(modifierById(posBlock.parentId).isDefined, "Parent should always be in history")
       val parentPoSId: ModifierId = modifierById(posBlock.parentId).get.asInstanceOf[PowBlock].prevPosId
       (storage.getPoWDifficulty(Some(parentPoSId)), storage.getPoSDifficulty(parentPoSId))
     }
@@ -269,15 +277,17 @@ class HybridHistory(val storage: HistoryStorage,
     continuationIds(info.startingPoints, size)
   }
 
-  override def syncInfo(answer: Boolean): HybridSyncInfo =
+  override def syncInfo: HybridSyncInfo =
     HybridSyncInfo(
-      answer,
+      false,
       lastPowBlocks(HybridSyncInfo.MaxLastPowBlocks, bestPowBlock).map(_.id),
       bestPosId)
 
   @tailrec
   private def divergentSuffix(otherLastPowBlocks: Seq[ModifierId],
                               suffixFound: Seq[ModifierId] = Seq()): Seq[ModifierId] = {
+    // TODO: fixme, What should we do if `otherLastPowBlocks` is empty? Could we return Seq[ModifierId]() in that case?
+    @SuppressWarnings(Array("org.wartremover.warts.TraversableOps"))
     val head = otherLastPowBlocks.head
     val newSuffix = suffixFound :+ head
     modifierById(head) match {
@@ -286,7 +296,10 @@ class HybridHistory(val storage: HistoryStorage,
       case None => if (otherLastPowBlocks.length <= 1) {
         Seq()
       } else {
-        divergentSuffix(otherLastPowBlocks.tail, newSuffix)
+        // `otherLastPowBlocks.tail` is safe as its length is greater than 1
+        @SuppressWarnings(Array("org.wartremover.warts.TraversableOps"))
+        val otherLastPowBlocksTail = otherLastPowBlocks.tail
+        divergentSuffix(otherLastPowBlocksTail, newSuffix)
       }
     }
   }
@@ -305,7 +318,10 @@ class HybridHistory(val storage: HistoryStorage,
         log.warn(s"CompareNonsense: ${other.lastPowBlockIds.toList.map(Base58.encode)} at height $height}")
         HistoryComparisonResult.Nonsense
       case 1 =>
-        if (dSuffix.head sameElements bestPowId) {
+        // `dSuffix.head` is safe as `dSuffix.length` is 1
+        @SuppressWarnings(Array("org.wartremover.warts.TraversableOps"))
+        val dSuffixHead = dSuffix.head
+        if (dSuffixHead sameElements bestPowId) {
           if (other.lastPosBlockId sameElements bestPosId) {
             HistoryComparisonResult.Equal
           } else if (pairCompleted) {
@@ -316,6 +332,8 @@ class HybridHistory(val storage: HistoryStorage,
         } else HistoryComparisonResult.Younger
       case _ =>
         // +1 to include common block
+        // TODO: What would be a default value for `localSuffixLength` in order to remove the unsafe calls to get and tail?
+        @SuppressWarnings(Array("org.wartremover.warts.TraversableOps"))
         val localSuffixLength = storage.heightOf(bestPowId).get - storage.heightOf(dSuffix.last).get
         val otherSuffixLength = dSuffix.length
 
@@ -406,14 +424,26 @@ class HybridHistory(val storage: HistoryStorage,
     def in(m: HybridBlock): Boolean = loserChain.exists(s => s sameElements m.id)
 
     val winnerChain = chainBack(forkBlock, in, limit).get.map(_._2)
-    val i = loserChain.indexWhere(id => id sameElements winnerChain.head)
+    val i = loserChain.indexWhere { id =>
+      winnerChain.headOption match {
+        case None                  => false
+        case Some(winnerChainHead) => id sameElements winnerChainHead
+      }
+    }
     (winnerChain, loserChain.takeRight(loserChain.length - i))
-  }.ensuring(r => r._1.head sameElements r._2.head)
+  } ensuring { r =>
+    @SuppressWarnings(Array("org.wartremover.warts.TraversableOps"))
+    val r1 = r._1.head
+    @SuppressWarnings(Array("org.wartremover.warts.TraversableOps"))
+    val r2 = r._2.head
+    r1 sameElements r2
+  }
 
   /**
     * Average delay in milliseconds between last $blockNum blocks starting from $block
     * Debug only
     */
+  @SuppressWarnings(Array("org.wartremover.warts.TraversableOps"))
   def averageDelay(id: ModifierId, blockNum: Int): Try[Long] = Try {
     val block = modifierById(id).get
     val c = chainBack(block, isGenesis, blockNum).get.map(_._2)
@@ -444,11 +474,11 @@ class HybridHistory(val storage: HistoryStorage,
 object HybridHistory extends ScorexLogging {
   val DifficultyRecalcPeriod = 20
 
-  def readOrGenerate(settings: ScorexSettings, minerSettings: HybridMiningSettings): HybridHistory = {
-    readOrGenerate(settings.dataDir, settings.logDir, minerSettings)
+  def readOrGenerate(settings: ScorexSettings, minerSettings: HybridMiningSettings, timeProvider: NetworkTimeProvider): HybridHistory = {
+    readOrGenerate(settings.dataDir, settings.logDir, minerSettings, timeProvider)
   }
 
-  def readOrGenerate(dataDir: File, logDir: File, settings: HybridMiningSettings): HybridHistory = {
+  def readOrGenerate(dataDir: File, logDir: File, settings: HybridMiningSettings, timeProvider: NetworkTimeProvider): HybridHistory = {
     val iFile = new File(s"${dataDir.getAbsolutePath}/blocks")
     iFile.mkdirs()
     val blockStorage = new LSMStore(iFile, maxJournalEntryCount = 10000)
@@ -468,6 +498,6 @@ object HybridHistory extends ScorexLogging {
       new SemanticBlockValidator(Blake2b256)
     )
 
-    new HybridHistory(storage, settings, validators, Some(logger))
+    new HybridHistory(storage, settings, validators, Some(logger), timeProvider)
   }
 }

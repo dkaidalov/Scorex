@@ -2,41 +2,39 @@ package scorex.core.network.peer
 
 import java.net.InetSocketAddress
 
-import scorex.core.settings.NetworkSettings
+import scorex.core.utils.NetworkTime
 
 import scala.collection.mutable
 
 
 //todo: persistence
-class PeerDatabaseImpl(settings: NetworkSettings, filename: Option[String]) extends PeerDatabase {
+class PeerDatabaseImpl(filename: Option[String]) extends PeerDatabase {
 
   private val whitelistPersistence = mutable.Map[InetSocketAddress, PeerInfo]()
 
-  private val blacklist = mutable.Map[String, Long]()
-
-  private lazy val ownNonce = settings.nodeNonce
+  private val blacklist = mutable.Map[String, NetworkTime.Time]()
 
   override def addOrUpdateKnownPeer(address: InetSocketAddress, peerInfo: PeerInfo): Unit = {
-    val updatedPeerInfo = whitelistPersistence.get(address).map { dbPeerInfo =>
-      val nonceOpt = peerInfo.nonce.orElse(dbPeerInfo.nonce)
-      val nodeNameOpt = peerInfo.nodeName.orElse(dbPeerInfo.nodeName)
-      PeerInfo(peerInfo.lastSeen, nonceOpt, nodeNameOpt)
-    }.getOrElse(peerInfo)
+    val updatedPeerInfo = whitelistPersistence.get(address).fold(peerInfo) { dbPeerInfo =>
+      val nodeNameOpt = peerInfo.nodeName orElse dbPeerInfo.nodeName
+      val connTypeOpt = peerInfo.connectionType orElse  dbPeerInfo.connectionType
+      PeerInfo(peerInfo.lastSeen, nodeNameOpt, connTypeOpt)
+    }
     whitelistPersistence.put(address, updatedPeerInfo)
   }
 
-  override def blacklistPeer(address: InetSocketAddress): Unit = {
+  override def blacklistPeer(address: InetSocketAddress, time: NetworkTime.Time): Unit = {
     whitelistPersistence.remove(address)
-    if (!isBlacklisted(address)) blacklist += address.getHostName -> System.currentTimeMillis()
+    if (!isBlacklisted(address)) blacklist += address.getHostName -> time
   }
 
   override def isBlacklisted(address: InetSocketAddress): Boolean = {
     blacklist.synchronized(blacklist.contains(address.getHostName))
   }
 
-  override def knownPeers(excludeSelf: Boolean): Map[InetSocketAddress, PeerInfo] =
-    (if (excludeSelf) knownPeers(false).filter(_._2.nonce.getOrElse(-1) != ownNonce.getOrElse(-1))
-     else whitelistPersistence.keys.flatMap(k => whitelistPersistence.get(k).map(v => k -> v))).toMap
+  override def knownPeers(): Map[InetSocketAddress, PeerInfo] = {
+    whitelistPersistence.keys.flatMap(k => whitelistPersistence.get(k).map(v => k -> v)).toMap
+  }
 
   override def blacklistedPeers(): Seq[String] = blacklist.keys.toSeq
 

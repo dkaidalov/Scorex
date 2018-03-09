@@ -2,7 +2,7 @@ package examples.trimchain.simulation
 
 import java.io.File
 
-import examples.curvepos.transaction.PublicKey25519NoncedBox
+import examples.commons.PublicKey25519NoncedBox
 
 object SpaceSavingsCalculator extends App {
 
@@ -18,6 +18,8 @@ object SpaceSavingsCalculator extends App {
 
   //  println(lines.head)
 
+  // TODO: fixme, What should we do if `lines` is empty?
+  @SuppressWarnings(Array("org.wartremover.warts.TraversableOps"))
   val data = lines.tail.take(finish).map(_.split(","))
 
   val blockSizes = data.map(_.apply(8)).map(_.toLong)

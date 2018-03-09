@@ -1,6 +1,6 @@
 package hybrid.wallet
 
-import examples.curvepos.Value
+import examples.commons.Value
 import examples.hybrid.blocks.PosBlock
 import examples.hybrid.wallet.HWallet
 import hybrid.HybridGenerators
@@ -15,6 +15,7 @@ import scorex.crypto.signatures.Signature
 import scala.annotation.tailrec
 import scala.util.Random
 
+@SuppressWarnings(Array("org.wartremover.warts.TraversableOps"))
 class HWalletSpecification extends PropSpec
   with PropertyChecks
   with GeneratorDrivenPropertyChecks
