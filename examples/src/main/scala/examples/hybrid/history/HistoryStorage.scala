@@ -102,7 +102,11 @@ class HistoryStorage(storage: LSMStore,
       case _ => Seq()
     }
 
-    val childSeq = if(!isGenesis(b) && isBest) Seq(bestChildKey(b.parentId) -> ByteArrayWrapper(b.id)) else Seq()
+    val parentId = b match {
+      case powBlock: PowBlock => powBlock.prevPosId
+      case posBlock: PosBlock => posBlock.parentId
+    }
+    val childSeq = if(!isGenesis(b) && isBest) Seq(bestChildKey(parentId) -> ByteArrayWrapper(b.id)) else Seq()
 
     storage.update(
       ByteArrayWrapper(b.id),
