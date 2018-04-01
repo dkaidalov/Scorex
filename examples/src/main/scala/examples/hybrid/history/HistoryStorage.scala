@@ -69,12 +69,7 @@ class HistoryStorage(storage: LSMStore,
 
   def updateValidity(b: HybridBlock, status: ModifierSemanticValidity) {
     val version = ByteArrayWrapper(Sha256(scala.util.Random.nextString(20).getBytes("UTF-8")))
-    storage.update(version, Seq(), Seq(validityKey(b) -> ByteArrayWrapper(Array(status. code))))
-  }
-
-  def updateBestChild(parentId: ModifierId, childId: ModifierId): Unit = {
-    val version = ByteArrayWrapper(Sha256(scala.util.Random.nextString(20).getBytes("UTF-8")))
-    storage.update(version, Seq(), Seq(bestChildKey(parentId) -> ByteArrayWrapper(childId)))
+    storage.update(version, Seq(), Seq(validityKey(b) -> ByteArrayWrapper(Array(status.code))))
   }
 
   def update(b: HybridBlock, difficulty: Option[(BigInt, Long)], isBest: Boolean) {
@@ -101,20 +96,13 @@ class HistoryStorage(storage: LSMStore,
         Seq(bestPowIdKey -> ByteArrayWrapper(posBlock.parentId), bestPosIdKey -> ByteArrayWrapper(posBlock.id))
       case _ => Seq()
     }
-
-    val parentId = b match {
-      case powBlock: PowBlock => powBlock.prevPosId
-      case posBlock: PosBlock => posBlock.parentId
-    }
-    val childSeq = if(!isGenesis(b) && isBest) Seq(bestChildKey(parentId) -> ByteArrayWrapper(b.id)) else Seq()
-
+    
     storage.update(
       ByteArrayWrapper(b.id),
       Seq(),
       blockDiff ++
         blockH ++
         bestBlockSeq ++
-        childSeq ++
         Seq(ByteArrayWrapper(b.id) -> ByteArrayWrapper(typeByte +: b.bytes)))
   }
 
@@ -143,13 +131,6 @@ class HistoryStorage(storage: LSMStore,
     case powBlock: PowBlock => powBlock.prevPosId
     case posBlock: PosBlock => posBlock.parentId
   }
-
-  def bestChildId(block: HybridBlock): Option[ModifierId] =
-    storage.get(bestChildKey(block.id)).map(ModifierId @@ _.data)
-
-
-  private def bestChildKey(blockId: ModifierId): ByteArrayWrapper =
-    ByteArrayWrapper(Sha256("child".getBytes("UTF-8") ++ blockId))
 
   private def validityKey(b: HybridBlock): ByteArrayWrapper =
     ByteArrayWrapper(Sha256("validity".getBytes("UTF-8") ++ b.id))

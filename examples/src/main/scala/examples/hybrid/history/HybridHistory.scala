@@ -149,8 +149,6 @@ class HybridHistory(val storage: HistoryStorage,
     } else if (parent.prevPosId sameElements bestPowBlock.prevPosId) {
       log.debug(s"New best PoS block with link to non-best brother ${Base58.encode(posBlock.id)}")
       //rollback to previous PoS block and apply parent block one more time
-      storage.updateBestChild(parent.prevPosId, parent.id)
-      storage.updateBestChild(parent.id, posBlock.id)
       ProgressInfo(Some(parent.prevPosId), Seq(bestPowBlock), Seq(parent, posBlock), Seq())
     } else {
       bestForkChanges(posBlock)
@@ -199,12 +197,6 @@ class HybridHistory(val storage: HistoryStorage,
     val newSuffixValid = !newSuffix.drop(1).map(storage.semanticValidity).contains(Invalid)
 
     if(newSuffixValid) {
-
-      //update best links
-      (newSuffix ++ Seq(block.id)).sliding(2, 1).foreach{p =>
-        storage.updateBestChild(p(0), p(1))
-      }
-
       // TODO: fixme, What should we do if `oldSuffix` is empty?
       @SuppressWarnings(Array("org.wartremover.warts.TraversableOps"))
       val throwBlocks = oldSuffix.tail.map(id => modifierById(id).get)
@@ -213,7 +205,6 @@ class HybridHistory(val storage: HistoryStorage,
       val applyBlocks = newSuffix.tail.map(id => modifierById(id).get) ++ Seq(block)
       require(applyBlocks.nonEmpty)
       require(throwBlocks.nonEmpty)
-      require(storage.bestChildId(modifierById(rollbackPoint.get).get).get sameElements applyBlocks.headOption.get.id)
 
       ProgressInfo[HybridBlock](rollbackPoint, throwBlocks, applyBlocks, Seq())
     } else {
@@ -465,21 +456,19 @@ class HybridHistory(val storage: HistoryStorage,
     chainBack(storage.bestPosBlock, isGenesis).get.map(_._2).map(Base58.encode).mkString(",")
   }
 
-  override def reportSemanticValidity(modifier: HybridBlock,
-                                      valid: Boolean,
-                                      lastApplied: ModifierId): (HybridHistory, ProgressInfo[HybridBlock]) = {
-    val v = if (valid) Valid else Invalid
-    storage.updateValidity(modifier, v)
+  override def reportModifierIsValid(modifier: HybridBlock): HybridHistory = {
+    storage.updateValidity(modifier, Valid)
 
-    val h = new HybridHistory(storage, settings, validators, statsLogger, timeProvider)
+    new HybridHistory(storage, settings, validators, statsLogger, timeProvider)
+  }
 
-    if (valid) {
-      val nextModToApply = storage.bestChildId(modifier).flatMap(storage.modifierById)
-      val p = ProgressInfo(None, Seq(), nextModToApply.map(Seq(_)).getOrElse(Seq()), Seq())
-      h -> p
-    } else {
-      h -> ProgressInfo(None, Seq(), Seq(), Seq())
-    }
+  override def reportModifierIsInvalid(modifier: HybridBlock,
+                                       progressInfo: ProgressInfo[HybridBlock]): (HybridHistory,
+                                                                                  ProgressInfo[HybridBlock]) = {
+    storage.updateValidity(modifier, Invalid)
+
+    new HybridHistory(storage, settings, validators, statsLogger, timeProvider) ->
+      ProgressInfo(None, Seq(), Seq(), Seq())
   }
 
   override def isSemanticallyValid(modifierId: ModifierId): ModifierSemanticValidity =
